@@ -84,9 +84,9 @@ async function handleCallbackQuery(callbackQuery) {
     case "help":
       sendMessage(
         chatId,
-        "🤖 Bot Commands:\n\n" +
+        "🤖 <b>Bot Commands</b>\n\n" +
           "/start - Show main menu\n" +
-          "/search <query> - Find content\n\n" +
+          "/search &lt;query&gt; - Find content\n\n" +
           "Navigate using the inline buttons!"
       );
       break;
@@ -201,7 +201,9 @@ async function sendMedia(chatId, pageId, season, episode) {
       // Send videos with captions
       mediaGroups.video.forEach(async (videoUrl, index) => {
         const caption =
-          index === 0 ? `Season ${season} Episode ${episode}` : "";
+          index === 0
+            ? `Season ${escapeHtml(season)} Episode ${escapeHtml(episode)}`
+            : "";
 
         await sendVideo(chatId, videoUrl, caption);
         await delay(500); // Rate limiting
@@ -209,6 +211,12 @@ async function sendMedia(chatId, pageId, season, episode) {
     }
   );
 }
+const escapeHtml = (text) => {
+  return text
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/&/g, "&amp;");
+};
 
 // Telegram API helpers
 async function sendMessage(chatId, text, buttons = []) {
@@ -219,14 +227,17 @@ async function sendMessage(chatId, text, buttons = []) {
         }
       : undefined;
 
-  await axios.post(`${API_URL}/sendMessage`, {
-    chat_id: chatId,
-    text,
-    parse_mode: "HTML",
-    reply_markup: replyMarkup,
-  });
+  try {
+    await axios.post(`${API_URL}/sendMessage`, {
+      chat_id: chatId,
+      text: escapeHtml(text),
+      parse_mode: "HTML",
+      reply_markup: replyMarkup,
+    });
+  } catch (error) {
+    console.error("Error sending message:", error.response?.data);
+  }
 }
-
 async function sendPhotoGroup(chatId, photoUrls) {
   await axios.post(`${API_URL}/sendMediaGroup`, {
     chat_id: chatId,
