@@ -54,11 +54,42 @@ async function handleMessage(message) {
   }
 }
 
+async function sendMainMenu(chatId) {
+  const text = "Welcome to the bot! Choose an option:";
+  const buttons = [
+    [
+      {
+        text: "🔍 Search Content",
+        callback_data: "search_init",
+      },
+    ],
+    [
+      {
+        text: "ℹ️ Help",
+        callback_data: "help",
+      },
+    ],
+  ];
+  await sendMessage(chatId, text, buttons);
+}
+
 async function handleCallbackQuery(callbackQuery) {
   const chatId = callbackQuery.message.chat.id;
   const data = callbackQuery.data.split(":");
 
   switch (data[0]) {
+    case "search_init":
+      sendMessage(chatId, "Please use /search <query> to find content");
+      break;
+    case "help":
+      sendMessage(
+        chatId,
+        "🤖 Bot Commands:\n\n" +
+          "/start - Show main menu\n" +
+          "/search <query> - Find content\n\n" +
+          "Navigate using the inline buttons!"
+      );
+      break;
     case "page":
       showSeasons(chatId, data[1]);
       break;
