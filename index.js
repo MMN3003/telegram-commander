@@ -31,6 +31,8 @@ app.post("/webhook", async (req, res) => {
     await handleMessage(update.message);
   } else if (update.callback_query) {
     await handleCallbackQuery(update.callback_query);
+  } else {
+    console.log("Received unknown update:", update);
   }
   res.sendStatus(200);
 });
@@ -148,11 +150,12 @@ async function searchPages(chatId, query) {
   );
 }
 
-// Add loading states and error feedback
 async function showSeasons(chatId, pageId) {
+  let loadingMessageId;
   try {
-    // Show loading state
-    await sendMessage(chatId, "⏳ Loading seasons...");
+    // Send loading message and store its ID
+    const loadingMessage = await sendMessage(chatId, "⏳ Loading seasons...");
+    loadingMessageId = loadingMessage.message_id;
 
     db.all(
       `SELECT season FROM media 
@@ -161,27 +164,29 @@ async function showSeasons(chatId, pageId) {
          ORDER BY season`,
       [pageId],
       async (err, seasons) => {
-        if (err) {
-          console.error("Season load error:", err);
-          return sendMessage(chatId, "❌ Failed to load seasons");
+        try {
+          if (err) throw err;
+
+          // Delete loading message
+          await axios.post(`${API_URL}/deleteMessage`, {
+            chat_id: chatId,
+            message_id: loadingMessageId,
+          });
+
+          // Show seasons
+          const buttons = seasons.map((season) => [
+            {
+              text: `Season ${season.season}`,
+              callback_data: `season:${pageId}:${season.season}`,
+            },
+          ]);
+
+          buttons.push([{ text: "← Back", callback_data: "back:search" }]);
+          await sendMessage(chatId, "📺 Select season:", buttons);
+        } catch (error) {
+          console.error("Season load error:", error);
+          await sendMessage(chatId, "❌ Failed to load seasons");
         }
-
-        // Delete loading message
-        await axios.post(`${API_URL}/deleteMessage`, {
-          chat_id: chatId,
-          message_id: messageId,
-        });
-
-        // Show seasons
-        const buttons = seasons.map((season) => [
-          {
-            text: `Season ${season.season}`,
-            callback_data: `season:${pageId}:${season.season}`,
-          },
-        ]);
-
-        buttons.push([{ text: "← Back", callback_data: "back:search" }]);
-        await sendMessage(chatId, "📺 Select season:", buttons);
       }
     );
   } catch (error) {
