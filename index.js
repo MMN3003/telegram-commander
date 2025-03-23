@@ -194,12 +194,14 @@ function handleBackNavigation(chatId, data) {
 
 // /start command.
 bot.onText(/\/start/, (msg) => {
+  console.log("Received /start command:", msg);
   const chatId = msg.chat.id;
   sendMainMenu(chatId);
 });
 
 // /search command.
 bot.onText(/\/search (.+)/, (msg, match) => {
+  console.log("Received /search command with query:", msg);
   const chatId = msg.chat.id;
   const query = match[1];
   if (query) {
@@ -211,6 +213,7 @@ bot.onText(/\/search (.+)/, (msg, match) => {
 
 // /help command.
 bot.onText(/\/help/, (msg) => {
+  console.log("Received /help command");
   const chatId = msg.chat.id;
   bot.sendMessage(
     chatId,
@@ -265,6 +268,7 @@ bot.on("callback_query", (callbackQuery) => {
 
 // Fallback for unrecognized text (non-command messages).
 bot.on("message", (msg) => {
+  console.log("Received message:", msg);
   const chatId = msg.chat.id;
   // Avoid handling callback queries here.
   if (!msg.text.startsWith("/")) {
