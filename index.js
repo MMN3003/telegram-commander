@@ -6,15 +6,20 @@ require("dotenv").config();
 const BOT_TOKEN = process.env.TELEGRAM_BOT_API_KEY;
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 const PORT = process.env.PORT || 3000;
+let bot;
+let db;
+async function init() {
+  // Create bot in webhook mode
+  bot = new TelegramBot(BOT_TOKEN, { webHook: { port: PORT } });
+  const data = await bot.setWebHook(WEBHOOK_URL);
+  console.log(data);
+  console.log("Bot is running and listening for updates...");
 
-// Create bot in webhook mode
-const bot = new TelegramBot(BOT_TOKEN, { webHook: { port: PORT } });
-bot.setWebHook(WEBHOOK_URL);
-console.log("Bot is running and listening for updates...");
+  // Database setup
+  db = new sqlite3.Database(process.env.DB_PATH || "./crawler.db");
+}
 
-// Database setup
-const db = new sqlite3.Database(process.env.DB_PATH || "./crawler.db");
-
+init();
 // ----------------------
 // Helper Functions
 // ----------------------
