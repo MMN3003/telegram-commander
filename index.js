@@ -78,11 +78,10 @@ async function sendMainMenu(chatId) {
 async function handleCallbackQuery(callbackQuery) {
   console.log("Received callback query:", callbackQuery);
   const chatId = callbackQuery.message.chat.id;
-  const messageId = callbackQuery.message.message_id;
   const data = callbackQuery.data.split(":");
 
   try {
-    // Acknowledge the callback first
+    // Acknowledge the callback to hide the loading spinner
     await axios.post(`${API_URL}/answerCallbackQuery`, {
       callback_query_id: callbackQuery.id,
     });
@@ -96,7 +95,7 @@ async function handleCallbackQuery(callbackQuery) {
           chatId,
           "🤖 <b>Bot Commands</b>\n\n" +
             "/start - Show main menu\n" +
-            "/search &lt;query&gt; - Find content\n\n" +
+            "/search <query> - Find content\n\n" +
             "Navigate using the inline buttons!"
         );
         break;
@@ -121,7 +120,7 @@ async function handleCallbackQuery(callbackQuery) {
   }
 }
 
-// Add error handling to database functions
+// Database search function
 async function searchPages(chatId, query) {
   db.all(
     `SELECT id, name FROM pages 
@@ -153,7 +152,7 @@ async function searchPages(chatId, query) {
 async function showSeasons(chatId, pageId) {
   let loadingMessageId;
   try {
-    // Send loading message and store its ID
+    // Send a loading message and store its ID
     const loadingMessage = await sendMessage(chatId, "⏳ Loading seasons...");
     loadingMessageId = loadingMessage.message_id;
 
@@ -167,13 +166,13 @@ async function showSeasons(chatId, pageId) {
         try {
           if (err) throw err;
 
-          // Delete loading message
+          // Delete the loading message
           await axios.post(`${API_URL}/deleteMessage`, {
             chat_id: chatId,
             message_id: loadingMessageId,
           });
 
-          // Show seasons
+          // Prepare season buttons
           const buttons = seasons.map((season) => [
             {
               text: `Season ${season.season}`,
@@ -181,6 +180,7 @@ async function showSeasons(chatId, pageId) {
             },
           ]);
 
+          // Add a Back button to return to main menu
           buttons.push([{ text: "← Back", callback_data: "back:search" }]);
           await sendMessage(chatId, "📺 Select season:", buttons);
         } catch (error) {
@@ -194,6 +194,7 @@ async function showSeasons(chatId, pageId) {
     await sendMessage(chatId, "⚠️ Failed to display seasons");
   }
 }
+
 async function showEpisodes(chatId, pageId, season) {
   db.all(
     `SELECT episode FROM media 
@@ -202,7 +203,10 @@ async function showEpisodes(chatId, pageId, season) {
      ORDER BY episode`,
     [pageId, season],
     (err, episodes) => {
-      if (err) return console.error(err);
+      if (err) {
+        console.error("Episodes load error:", err);
+        return sendMessage(chatId, "❌ Failed to load episodes");
+      }
 
       const buttons = episodes.map((episode) => [
         {
@@ -211,6 +215,7 @@ async function showEpisodes(chatId, pageId, season) {
         },
       ]);
 
+      // Back button to return to season selection
       buttons.push([{ text: "← Back", callback_data: `back:page:${pageId}` }]);
       sendMessage(chatId, "Select episode:", buttons);
     }
@@ -225,7 +230,10 @@ async function sendMedia(chatId, pageId, season, episode) {
      ORDER BY type DESC`,
     [pageId, season, episode],
     async (err, mediaItems) => {
-      if (err) return console.error(err);
+      if (err) {
+        console.error("Media load error:", err);
+        return sendMessage(chatId, "❌ Failed to load media");
+      }
 
       // Group media by type
       const mediaGroups = {
@@ -237,24 +245,25 @@ async function sendMedia(chatId, pageId, season, episode) {
         mediaGroups[item.type].push(item.url);
       });
 
-      // Send image first
+      // Send images as a group if available
       if (mediaGroups.image.length > 0) {
         await sendPhotoGroup(chatId, mediaGroups.image);
       }
 
-      // Send videos with captions
+      // Send videos with a caption on the first video
       mediaGroups.video.forEach(async (videoUrl, index) => {
         const caption =
           index === 0
             ? `Season ${escapeHtml(season)} Episode ${escapeHtml(episode)}`
             : "";
-
         await sendVideo(chatId, videoUrl, caption);
-        await delay(500); // Rate limiting
+        await delay(500); // Simple rate limiting
       });
     }
   );
 }
+
+// Utility function for HTML escaping (used for media captions)
 const escapeHtml = (text) => {
   return text
     .replace(/</g, "&lt;")
@@ -262,24 +271,24 @@ const escapeHtml = (text) => {
     .replace(/&/g, "&amp;");
 };
 
+// Modified sendMessage: removed escape to allow proper HTML formatting
 async function sendMessage(chatId, text, buttons = []) {
   try {
     const response = await axios.post(`${API_URL}/sendMessage`, {
       chat_id: chatId,
-      text: escapeHtml(text),
+      text, // Text is sent as-is
       parse_mode: "HTML",
       reply_markup:
         buttons.length > 0 ? { inline_keyboard: buttons } : undefined,
     });
-
     console.log("Message sent:", response.data);
-
-  return response.data;
+    return response.data;
   } catch (error) {
     console.error("Message send error:", error.response?.data);
     throw error;
   }
 }
+
 async function sendPhotoGroup(chatId, photoUrls) {
   await axios.post(`${API_URL}/sendMediaGroup`, {
     chat_id: chatId,
@@ -303,13 +312,28 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Back navigation handler for inline buttons
+async function handleBackNavigation(chatId, data) {
+  // data[1] holds the back target type
+  if (data[1] === "search") {
+    // Go back to main menu
+    await sendMainMenu(chatId);
+  } else if (data[1] === "page" && data[2]) {
+    // Go back to season selection for the given page
+    await showSeasons(chatId, data[2]);
+  } else {
+    // Default to main menu if no valid target is found
+    await sendMainMenu(chatId);
+  }
+}
+
 // Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
 
-// Cleanup
+// Cleanup on shutdown
 process.on("SIGINT", () => {
   db.close();
   process.exit();
