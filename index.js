@@ -39,7 +39,7 @@ app.post("/webhook", async (req, res) => {
 async function handleMessage(message) {
   const chatId = message.chat.id;
   const text = message.text || "";
-
+  console.log("Received message:", message);
   if (text.startsWith("/start")) {
     sendMainMenu(chatId);
   } else if (text.startsWith("/search")) {
@@ -74,6 +74,7 @@ async function sendMainMenu(chatId) {
 }
 
 async function handleCallbackQuery(callbackQuery) {
+  console.log("Received callback query:", callbackQuery);
   const chatId = callbackQuery.message.chat.id;
   const messageId = callbackQuery.message.message_id;
   const data = callbackQuery.data.split(":");
