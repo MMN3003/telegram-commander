@@ -9,10 +9,15 @@ const PORT = process.env.PORT || 3000;
 let bot;
 let db;
 async function init() {
-  // Create bot in webhook mode
-  bot = new TelegramBot(BOT_TOKEN, { webHook: { port: PORT } });
-  const data = await bot.setWebHook(WEBHOOK_URL);
-  console.log(data);
+  // Create bot in webhook mode or polling mode based on DEBUG env
+  const option =
+    process.env.DEBUG?.toLocaleLowerCase() === "true"
+      ? { polling: true }
+      : { webHook: { port: PORT } };
+  bot = new TelegramBot(BOT_TOKEN, option);
+  if (!option.webHook) {
+    await bot.setWebHook(WEBHOOK_URL);
+  }
   console.log("Bot is running and listening for updates...");
 
   // Database setup
