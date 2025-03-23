@@ -1,179 +1,232 @@
-const fs = require("fs");
+const express = require("express");
+const sqlite3 = require("sqlite3").verbose();
 const axios = require("axios");
-const chokidar = require("chokidar");
-require("dotenv").config(); // Load environment variables from .env file
+const bodyParser = require("body-parser");
+require("dotenv").config();
 
-// Configuration from .env
-const API_KEY = process.env.TELEGRAM_BOT_API_KEY;
-const CHAT_ID = process.env.TELEGRAM_CHAT_ID; // or channel ID
-const WATCH_DIR = process.env.WATCH_DIR || "./links"; // Directory to watch for changes
-const CAPTION_MAX_LENGTH = parseInt(process.env.CAPTION_MAX_LENGTH) || 1024; // Telegram's caption limit
-const BASE_DELAY = parseInt(process.env.BASE_DELAY) || 500; // Base delay between messages in ms
-const MAX_RETRIES = 3; // Maximum number of retries for failed requests
+const app = express();
+app.use(bodyParser.json());
 
-// Helpers
-const isImage = (url) => /\.(png|jpg|jpeg)$/i.test(url);
-const isVideo = (url) => /\.(mkv|mp4)$/i.test(url);
+// Database setup
+const db = new sqlite3.Database(process.env.DB_PATH || "./crawler.db");
 
-// Extract file name from URL
-const extractFileName = (url) => {
-  const parts = url.split("/");
-  const fileName = parts[parts.length - 1]; // Get the last part of the URL
-  // splite by . and remove the last part
-  const nameParts = fileName.split(".").slice(0, -1);
-  return nameParts.join().replace(/-/g, " "); // Replace dots and dashes with spaces
-};
+// Session management
+const userSessions = new Map();
 
-// Extract season and episode from URL
-const extractSeasonAndEpisode = (url) => {
-  // Match S01.E01 or S01.01 format
-  const seasonEpisodeMatch = url.match(/\.(S\d+\.(?:E\d+|\d{2}))\./i);
-  if (seasonEpisodeMatch) {
-    const [season, episode] = seasonEpisodeMatch[1].split(".");
-    const episodeNumber = episode.startsWith("E") ? episode.slice(1) : episode; // Handle E01 or 01
-    return `Season ${season.slice(1)}, Episode ${episodeNumber}`;
+// Telegram API configuration
+const BOT_TOKEN = process.env.TELEGRAM_BOT_API_KEY;
+const WEBHOOK_URL = process.env.WEBHOOK_URL;
+const API_URL = `https://api.telegram.org/bot${BOT_TOKEN}`;
+
+// Set up webhook
+axios
+  .post(`${API_URL}/setWebhook`, { url: WEBHOOK_URL })
+  .then(() => console.log("Webhook set successfully"))
+  .catch((err) => console.error("Error setting webhook:", err));
+
+// Handle incoming updates
+app.post("/webhook", async (req, res) => {
+  const update = req.body;
+  if (update.message) {
+    await handleMessage(update.message);
+  } else if (update.callback_query) {
+    await handleCallbackQuery(update.callback_query);
   }
+  res.sendStatus(200);
+});
 
-  // Match episode-only format (e.g., 51)
-  const episodeOnlyMatch = url.match(/\.(\d{2})\./i);
-  if (episodeOnlyMatch) {
-    return `Episode ${episodeOnlyMatch[1]}`;
-  }
+// Command handlers
+async function handleMessage(message) {
+  const chatId = message.chat.id;
+  const text = message.text || "";
 
-  return "Unknown Season and Episode";
-};
-
-// Extract resolution from video URL
-const extractResolution = (url) => {
-  const match = url.match(/\.(480p|720p|1080p)\./i);
-  return match ? match[1].toUpperCase() : "Unknown Resolution";
-};
-
-// Send photo with caption to Telegram (with retry logic)
-async function sendPhotoToTelegram(imageUrl, caption, retryCount = 0) {
-  try {
-    const response = await axios.post(
-      `https://api.telegram.org/bot${API_KEY}/sendPhoto`,
-      {
-        chat_id: CHAT_ID,
-        photo: imageUrl,
-        caption: caption,
-        parse_mode: "HTML",
-        disable_notification: true,
-      }
-    );
-    console.log(`Sent: ${caption}`);
-    return response.data;
-  } catch (error) {
-    if (error.response?.data?.error_code === 429 && retryCount < MAX_RETRIES) {
-      // Rate limit exceeded, retry after the specified delay
-      const retryAfter = error.response.data.parameters?.retry_after || 10; // Default to 10 seconds
-      console.log(
-        `Rate limit exceeded. Retrying after ${retryAfter} seconds...`
-      );
-      await new Promise((resolve) => setTimeout(resolve, retryAfter * 1000));
-      return sendPhotoToTelegram(imageUrl, caption, retryCount + 1);
+  if (text.startsWith("/start")) {
+    sendMainMenu(chatId);
+  } else if (text.startsWith("/search")) {
+    const query = text.replace("/search", "").trim();
+    if (query) {
+      searchPages(chatId, query);
     } else {
-      console.error(
-        `Error sending ${caption}:`,
-        error.response?.data?.description || error.message
-      );
-      throw error;
+      sendMessage(chatId, "Please enter your search query after /search");
     }
+  } else {
+    sendMessage(chatId, "Use /search <query> to find content");
   }
 }
 
-// Process links from a file
-async function processFile(filePath) {
-  try {
-    // Read and parse links
-    const data = fs.readFileSync(filePath, "utf8");
-    const urls = data.split("\n").filter((link) => link.trim() !== "");
+async function handleCallbackQuery(callbackQuery) {
+  const chatId = callbackQuery.message.chat.id;
+  const data = callbackQuery.data.split(":");
 
-    // Group images with their videos
-    const groups = [];
-    let currentGroup = null;
-
-    for (const url of urls) {
-      if (isImage(url)) {
-        if (currentGroup) groups.push(currentGroup);
-        currentGroup = { image: url, videos: [] };
-      } else if (isVideo(url) && currentGroup) {
-        currentGroup.videos.push(url);
-      }
-    }
-    if (currentGroup) groups.push(currentGroup);
-
-    // Process each group
-    for (const group of groups) {
-      // Organize videos by resolution
-      const videosByResolution = group.videos.reduce((acc, video) => {
-        const resolution = extractResolution(video);
-        if (!acc[resolution]) acc[resolution] = [];
-        acc[resolution].push(video);
-        return acc;
-      }, {});
-
-      // Send a separate message for each resolution
-      for (const [resolution, videos] of Object.entries(videosByResolution)) {
-        const title = extractFileName(filePath);
-        const header = `<b>${title}</b>\n<b>${resolution}</b>\n\n`;
-        let caption = header;
-
-        // Add video links to the caption
-        for (const video of videos) {
-          const seasonEpisode = extractSeasonAndEpisode(video);
-          const filename = video.split("/").pop();
-          const link = `${seasonEpisode}: <a href="${video}">${filename}</a>`;
-          const newCaption = caption + link + "\n";
-
-          // If the new caption exceeds the limit, send the current caption and start a new one
-          if (newCaption.length > CAPTION_MAX_LENGTH) {
-            await sendPhotoToTelegram(group.image, caption.trim());
-            caption = header + link + "\n"; // Start new caption with the header and current link
-          } else {
-            caption = newCaption;
-          }
-        }
-
-        // Send the remaining caption
-        if (caption.trim() !== header.trim()) {
-          await sendPhotoToTelegram(group.image, caption.trim());
-        }
-
-        // Add delay to avoid rate limiting
-        await new Promise((resolve) => setTimeout(resolve, BASE_DELAY));
-      }
-    }
-
-    console.log(`Processed file: ${filePath}`);
-  } catch (error) {
-    console.error(`Error processing file ${filePath}:`, error);
+  switch (data[0]) {
+    case "page":
+      showSeasons(chatId, data[1]);
+      break;
+    case "season":
+      showEpisodes(chatId, data[1], data[2]);
+      break;
+    case "episode":
+      sendMedia(chatId, data[1], data[2], data[3]);
+      break;
+    case "back":
+      handleBackNavigation(chatId, data);
+      break;
   }
 }
 
-// Watch directory for changes
-function watchDirectory() {
-  const watcher = chokidar.watch(WATCH_DIR, {
-    persistent: true,
-    ignoreInitial: true, // Ignore initial scan
+// Database query functions
+async function searchPages(chatId, query) {
+  db.all(
+    `SELECT id, name FROM pages 
+     WHERE name LIKE ? 
+     ORDER BY name LIMIT 10`,
+    [`%${query}%`],
+    (err, pages) => {
+      if (err) return console.error(err);
+
+      const buttons = pages.map((page) => [
+        {
+          text: page.name,
+          callback_data: `page:${page.id}`,
+        },
+      ]);
+
+      sendMessage(chatId, "Search results:", buttons);
+    }
+  );
+}
+
+async function showSeasons(chatId, pageId) {
+  db.all(
+    `SELECT season FROM media 
+     WHERE page_id = ? 
+     GROUP BY season 
+     ORDER BY season`,
+    [pageId],
+    (err, seasons) => {
+      if (err) return console.error(err);
+
+      const buttons = seasons.map((season) => [
+        {
+          text: `Season ${season.season}`,
+          callback_data: `season:${pageId}:${season.season}`,
+        },
+      ]);
+
+      buttons.push([{ text: "← Back", callback_data: "back:search" }]);
+      sendMessage(chatId, "Select season:", buttons);
+    }
+  );
+}
+
+async function showEpisodes(chatId, pageId, season) {
+  db.all(
+    `SELECT episode FROM media 
+     WHERE page_id = ? AND season = ? 
+     GROUP BY episode 
+     ORDER BY episode`,
+    [pageId, season],
+    (err, episodes) => {
+      if (err) return console.error(err);
+
+      const buttons = episodes.map((episode) => [
+        {
+          text: `Episode ${episode.episode}`,
+          callback_data: `episode:${pageId}:${season}:${episode.episode}`,
+        },
+      ]);
+
+      buttons.push([{ text: "← Back", callback_data: `back:page:${pageId}` }]);
+      sendMessage(chatId, "Select episode:", buttons);
+    }
+  );
+}
+
+// Media sending function
+async function sendMedia(chatId, pageId, season, episode) {
+  db.all(
+    `SELECT * FROM media 
+     WHERE page_id = ? AND season = ? AND episode = ? 
+     ORDER BY type DESC`,
+    [pageId, season, episode],
+    async (err, mediaItems) => {
+      if (err) return console.error(err);
+
+      // Group media by type
+      const mediaGroups = {
+        image: [],
+        video: [],
+      };
+
+      mediaItems.forEach((item) => {
+        mediaGroups[item.type].push(item.url);
+      });
+
+      // Send image first
+      if (mediaGroups.image.length > 0) {
+        await sendPhotoGroup(chatId, mediaGroups.image);
+      }
+
+      // Send videos with captions
+      mediaGroups.video.forEach(async (videoUrl, index) => {
+        const caption =
+          index === 0 ? `Season ${season} Episode ${episode}` : "";
+
+        await sendVideo(chatId, videoUrl, caption);
+        await delay(500); // Rate limiting
+      });
+    }
+  );
+}
+
+// Telegram API helpers
+async function sendMessage(chatId, text, buttons = []) {
+  const replyMarkup =
+    buttons.length > 0
+      ? {
+          inline_keyboard: buttons,
+        }
+      : undefined;
+
+  await axios.post(`${API_URL}/sendMessage`, {
+    chat_id: chatId,
+    text,
+    parse_mode: "HTML",
+    reply_markup: replyMarkup,
   });
-
-  watcher
-    .on("add", (filePath) => {
-      console.log(`File added: ${filePath}`);
-      processFile(filePath);
-    })
-    .on("change", (filePath) => {
-      console.log(`File changed: ${filePath}`);
-      processFile(filePath);
-    })
-    .on("error", (error) => {
-      console.error(`Watcher error: ${error}`);
-    });
-
-  console.log(`Watching directory: ${WATCH_DIR}`);
 }
 
-// Start watching the directory
-watchDirectory();
+async function sendPhotoGroup(chatId, photoUrls) {
+  await axios.post(`${API_URL}/sendMediaGroup`, {
+    chat_id: chatId,
+    media: photoUrls.map((url) => ({
+      type: "photo",
+      media: url,
+    })),
+  });
+}
+
+async function sendVideo(chatId, videoUrl, caption = "") {
+  await axios.post(`${API_URL}/sendVideo`, {
+    chat_id: chatId,
+    video: videoUrl,
+    caption,
+    parse_mode: "HTML",
+  });
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Start server
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
+
+// Cleanup
+process.on("SIGINT", () => {
+  db.close();
+  process.exit();
+});
