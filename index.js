@@ -1,132 +1,39 @@
-const express = require("express");
+const TelegramBot = require("node-telegram-bot-api");
 const sqlite3 = require("sqlite3").verbose();
-const axios = require("axios");
-const bodyParser = require("body-parser");
 require("dotenv").config();
 
-const app = express();
-app.use(bodyParser.json());
+// Telegram Bot configuration
+const BOT_TOKEN = process.env.TELEGRAM_BOT_API_KEY;
+const WEBHOOK_URL = process.env.WEBHOOK_URL;
+const PORT = process.env.PORT || 3000;
+
+// Create bot in webhook mode
+const bot = new TelegramBot(BOT_TOKEN, { webHook: { port: PORT } });
+bot.setWebHook(WEBHOOK_URL);
+console.log("Bot is running and listening for updates...");
 
 // Database setup
 const db = new sqlite3.Database(process.env.DB_PATH || "./crawler.db");
 
-// Telegram API configuration
-const BOT_TOKEN = process.env.TELEGRAM_BOT_API_KEY;
-const WEBHOOK_URL = process.env.WEBHOOK_URL;
-const API_URL = `https://api.telegram.org/bot${BOT_TOKEN}`;
+// ----------------------
+// Helper Functions
+// ----------------------
 
-// Set up webhook
-axios
-  .post(`${API_URL}/setWebhook`, { url: WEBHOOK_URL })
-  .then(() => console.log("Webhook set successfully"))
-  .catch((err) => console.error("Error setting webhook:", err));
-
-// Log every update received at webhook for debugging
-app.post("/webhook", async (req, res) => {
-  const update = req.body;
-  console.log("Update received:", JSON.stringify(update, null, 2));
-  if (update.message) {
-    await handleMessage(update.message);
-  } else if (update.callback_query) {
-    await handleCallbackQuery(update.callback_query);
-  } else {
-    console.log("Received unknown update type");
-  }
-  res.sendStatus(200);
-});
-
-// Command handlers
-async function handleMessage(message) {
-  const chatId = message.chat.id;
-  const text = message.text || "";
-  console.log("Received message:", text);
-  if (text.startsWith("/start")) {
-    sendMainMenu(chatId);
-  } else if (text.startsWith("/search")) {
-    const query = text.replace("/search", "").trim();
-    if (query) {
-      searchPages(chatId, query);
-    } else {
-      sendMessage(chatId, "Please enter your search query after /search");
-    }
-  } else {
-    sendMessage(chatId, "Use /search <query> to find content");
-  }
-}
-
-async function sendMainMenu(chatId) {
+// Sends the main menu with inline buttons.
+function sendMainMenu(chatId) {
   const text = "Welcome to the bot! Choose an option:";
   const buttons = [
-    [
-      {
-        text: "🔍 Search Content",
-        callback_data: "search_init",
-      },
-    ],
-    [
-      {
-        text: "ℹ️ Help",
-        callback_data: "help",
-      },
-    ],
+    [{ text: "🔍 Search Content", callback_data: "search_init" }],
+    [{ text: "ℹ️ Help", callback_data: "help" }],
   ];
-  await sendMessage(chatId, text, buttons);
+  return bot.sendMessage(chatId, text, {
+    parse_mode: "HTML",
+    reply_markup: { inline_keyboard: buttons },
+  });
 }
 
-async function handleCallbackQuery(callbackQuery) {
-  console.log(
-    "Received callback query:",
-    JSON.stringify(callbackQuery, null, 2)
-  );
-  const chatId = callbackQuery.message.chat.id;
-  const data = callbackQuery.data.split(":");
-  console.log("Parsed callback data:", data);
-
-  try {
-    // Acknowledge the callback query to remove the loading spinner
-    await axios.post(`${API_URL}/answerCallbackQuery`, {
-      callback_query_id: callbackQuery.id,
-    });
-  } catch (err) {
-    console.error("Error in answerCallbackQuery:", err.response?.data || err);
-  }
-
-  try {
-    switch (data[0]) {
-      case "search_init":
-        await sendMessage(chatId, "Please use /search <query> to find content");
-        break;
-      case "help":
-        await sendMessage(
-          chatId,
-          "🤖 <b>Bot Commands</b>\n\n" +
-            "/start - Show main menu\n" +
-            "/search <query> - Find content\n\n" +
-            "Navigate using the inline buttons!"
-        );
-        break;
-      case "page":
-        await showSeasons(chatId, data[1]);
-        break;
-      case "season":
-        await showEpisodes(chatId, data[1], data[2]);
-        break;
-      case "episode":
-        await sendMedia(chatId, data[1], data[2], data[3]);
-        break;
-      case "back":
-        await handleBackNavigation(chatId, data);
-        break;
-      default:
-        await sendMessage(chatId, "❌ Unknown command");
-    }
-  } catch (error) {
-    console.error("Error handling callback command:", error);
-    await sendMessage(chatId, "⚠️ An error occurred. Please try again.");
-  }
-}
-
-async function searchPages(chatId, query) {
+// Searches pages based on the provided query.
+function searchPages(chatId, query) {
   db.all(
     `SELECT id, name FROM pages 
        WHERE name LIKE ? 
@@ -135,43 +42,41 @@ async function searchPages(chatId, query) {
     (err, pages) => {
       if (err) {
         console.error("Search error:", err);
-        return sendMessage(chatId, "❌ Search failed. Please try again.");
+        return bot.sendMessage(chatId, "❌ Search failed. Please try again.");
       }
       if (pages.length === 0) {
-        return sendMessage(chatId, "🔍 No results found");
+        return bot.sendMessage(chatId, "🔍 No results found");
       }
       const buttons = pages.map((page) => [
-        {
-          text: page.name,
-          callback_data: `page:${page.id}`,
-        },
+        { text: page.name, callback_data: `page:${page.id}` },
       ]);
-      sendMessage(chatId, "🔎 Search results:", buttons);
+      bot.sendMessage(chatId, "🔎 Search results:", {
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard: buttons },
+      });
     }
   );
 }
 
-async function showSeasons(chatId, pageId) {
-  let loadingMessageId;
-  try {
-    // Send loading message
-    const loadingMessage = await sendMessage(chatId, "⏳ Loading seasons...");
-    loadingMessageId = loadingMessage.message_id;
-
-    db.all(
-      `SELECT season FROM media 
-         WHERE page_id = ? 
-         GROUP BY season 
-         ORDER BY season`,
-      [pageId],
-      async (err, seasons) => {
-        try {
-          if (err) throw err;
-          // Delete loading message
-          await axios.post(`${API_URL}/deleteMessage`, {
-            chat_id: chatId,
-            message_id: loadingMessageId,
-          });
+// Loads seasons for a given page.
+function showSeasons(chatId, pageId) {
+  bot
+    .sendMessage(chatId, "⏳ Loading seasons...")
+    .then((loadingMessage) => {
+      const loadingMessageId = loadingMessage.message_id;
+      db.all(
+        `SELECT season FROM media 
+           WHERE page_id = ? 
+           GROUP BY season 
+           ORDER BY season`,
+        [pageId],
+        (err, seasons) => {
+          if (err) {
+            console.error("Season load error:", err);
+            return bot.sendMessage(chatId, "❌ Failed to load seasons");
+          }
+          // Delete the loading message.
+          bot.deleteMessage(chatId, loadingMessageId);
           const buttons = seasons.map((season) => [
             {
               text: `Season ${season.season}`,
@@ -179,20 +84,21 @@ async function showSeasons(chatId, pageId) {
             },
           ]);
           buttons.push([{ text: "← Back", callback_data: "back:search" }]);
-          await sendMessage(chatId, "📺 Select season:", buttons);
-        } catch (error) {
-          console.error("Season load error:", error);
-          await sendMessage(chatId, "❌ Failed to load seasons");
+          bot.sendMessage(chatId, "📺 Select season:", {
+            parse_mode: "HTML",
+            reply_markup: { inline_keyboard: buttons },
+          });
         }
-      }
-    );
-  } catch (error) {
-    console.error("Error in showSeasons:", error);
-    await sendMessage(chatId, "⚠️ Failed to display seasons");
-  }
+      );
+    })
+    .catch((err) => {
+      console.error("Error in showSeasons:", err);
+      bot.sendMessage(chatId, "⚠️ Failed to display seasons");
+    });
 }
 
-async function showEpisodes(chatId, pageId, season) {
+// Loads episodes for a given page and season.
+function showEpisodes(chatId, pageId, season) {
   db.all(
     `SELECT episode FROM media 
      WHERE page_id = ? AND season = ? 
@@ -202,7 +108,7 @@ async function showEpisodes(chatId, pageId, season) {
     (err, episodes) => {
       if (err) {
         console.error("Episodes load error:", err);
-        return sendMessage(chatId, "❌ Failed to load episodes");
+        return bot.sendMessage(chatId, "❌ Failed to load episodes");
       }
       const buttons = episodes.map((episode) => [
         {
@@ -211,110 +117,164 @@ async function showEpisodes(chatId, pageId, season) {
         },
       ]);
       buttons.push([{ text: "← Back", callback_data: `back:page:${pageId}` }]);
-      sendMessage(chatId, "Select episode:", buttons);
+      bot.sendMessage(chatId, "Select episode:", {
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard: buttons },
+      });
     }
   );
 }
 
-async function sendMedia(chatId, pageId, season, episode) {
+// Sends media (images and videos) for a given page, season, and episode.
+function sendMedia(chatId, pageId, season, episode) {
   db.all(
     `SELECT * FROM media 
      WHERE page_id = ? AND season = ? AND episode = ? 
      ORDER BY type DESC`,
     [pageId, season, episode],
-    async (err, mediaItems) => {
+    (err, mediaItems) => {
       if (err) {
         console.error("Media load error:", err);
-        return sendMessage(chatId, "❌ Failed to load media");
+        return bot.sendMessage(chatId, "❌ Failed to load media");
       }
-      const mediaGroups = {
-        image: [],
-        video: [],
-      };
+      const mediaGroups = { image: [], video: [] };
       mediaItems.forEach((item) => {
         mediaGroups[item.type].push(item.url);
       });
+      // Send images as a media group.
       if (mediaGroups.image.length > 0) {
-        await sendPhotoGroup(chatId, mediaGroups.image);
+        const mediaArray = mediaGroups.image.map((url) => ({
+          type: "photo",
+          media: url,
+        }));
+        bot.sendMediaGroup(chatId, mediaArray);
       }
-      mediaGroups.video.forEach(async (videoUrl, index) => {
+      // Send videos one-by-one, with a caption on the first.
+      mediaGroups.video.forEach((videoUrl, index) => {
         const caption =
           index === 0
             ? `Season ${escapeHtml(season)} Episode ${escapeHtml(episode)}`
             : "";
-        await sendVideo(chatId, videoUrl, caption);
-        await delay(500);
+        // Use a delay to avoid hitting rate limits.
+        setTimeout(() => {
+          bot.sendVideo(chatId, videoUrl, { caption, parse_mode: "HTML" });
+        }, 500 * index);
       });
     }
   );
 }
 
-// Simple HTML escape (used for media captions)
-const escapeHtml = (text) => {
+// Escapes HTML characters in a string.
+function escapeHtml(text) {
   return text
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/&/g, "&amp;");
-};
-
-async function sendMessage(chatId, text, buttons = []) {
-  try {
-    const response = await axios.post(`${API_URL}/sendMessage`, {
-      chat_id: chatId,
-      text, // Send text as-is so HTML formatting works
-      parse_mode: "HTML",
-      reply_markup:
-        buttons.length > 0 ? { inline_keyboard: buttons } : undefined,
-    });
-    console.log("Message sent:", response.data);
-    return response.data;
-  } catch (error) {
-    console.error("Message send error:", error.response?.data || error);
-    throw error;
-  }
 }
 
-async function sendPhotoGroup(chatId, photoUrls) {
-  await axios.post(`${API_URL}/sendMediaGroup`, {
-    chat_id: chatId,
-    media: photoUrls.map((url) => ({
-      type: "photo",
-      media: url,
-    })),
-  });
-}
-
-async function sendVideo(chatId, videoUrl, caption = "") {
-  await axios.post(`${API_URL}/sendVideo`, {
-    chat_id: chatId,
-    video: videoUrl,
-    caption,
-    parse_mode: "HTML",
-  });
-}
-
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function handleBackNavigation(chatId, data) {
+// Handles the "back" button navigation.
+function handleBackNavigation(chatId, data) {
   if (data[1] === "search") {
-    await sendMainMenu(chatId);
+    sendMainMenu(chatId);
   } else if (data[1] === "page" && data[2]) {
-    await showSeasons(chatId, data[2]);
+    showSeasons(chatId, data[2]);
   } else {
-    await sendMainMenu(chatId);
+    sendMainMenu(chatId);
   }
 }
 
-// Start server
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+// ----------------------
+// Command & Callback Handlers
+// ----------------------
+
+// /start command.
+bot.onText(/\/start/, (msg) => {
+  const chatId = msg.chat.id;
+  sendMainMenu(chatId);
 });
 
-// Cleanup on shutdown
+// /search command.
+bot.onText(/\/search (.+)/, (msg, match) => {
+  const chatId = msg.chat.id;
+  const query = match[1];
+  if (query) {
+    searchPages(chatId, query);
+  } else {
+    bot.sendMessage(chatId, "Please enter your search query after /search");
+  }
+});
+
+// /help command.
+bot.onText(/\/help/, (msg) => {
+  const chatId = msg.chat.id;
+  bot.sendMessage(
+    chatId,
+    "🤖 <b>Bot Commands</b>\n\n" +
+      "/start - Show main menu\n" +
+      "/search <query> - Find content\n\n" +
+      "Navigate using the inline buttons!",
+    { parse_mode: "HTML" }
+  );
+});
+
+// Callback query handler for inline buttons.
+bot.on("callback_query", (callbackQuery) => {
+  const data = callbackQuery.data.split(":");
+  const chatId = callbackQuery.message.chat.id;
+
+  // Acknowledge the callback query.
+  bot
+    .answerCallbackQuery(callbackQuery.id)
+    .catch((err) => console.error("Error in answerCallbackQuery:", err));
+
+  switch (data[0]) {
+    case "search_init":
+      bot.sendMessage(chatId, "Please use /search <query> to find content");
+      break;
+    case "help":
+      bot.sendMessage(
+        chatId,
+        "🤖 <b>Bot Commands</b>\n\n" +
+          "/start - Show main menu\n" +
+          "/search <query> - Find content\n\n" +
+          "Navigate using the inline buttons!",
+        { parse_mode: "HTML" }
+      );
+      break;
+    case "page":
+      showSeasons(chatId, data[1]);
+      break;
+    case "season":
+      showEpisodes(chatId, data[1], data[2]);
+      break;
+    case "episode":
+      sendMedia(chatId, data[1], data[2], data[3]);
+      break;
+    case "back":
+      handleBackNavigation(chatId, data);
+      break;
+    default:
+      bot.sendMessage(chatId, "❌ Unknown command");
+  }
+});
+
+// Fallback for unrecognized text (non-command messages).
+bot.on("message", (msg) => {
+  const chatId = msg.chat.id;
+  // Avoid handling callback queries here.
+  if (!msg.text.startsWith("/")) {
+    bot.sendMessage(chatId, "Use /search <query> to find content");
+  }
+});
+
 process.on("SIGINT", () => {
-  db.close();
-  process.exit();
+  console.log("SIGINT received. Shutting down gracefully...");
+  db.close((err) => {
+    if (err) {
+      console.error("Error closing the database:", err);
+    } else {
+      console.log("Database connection closed.");
+    }
+    process.exit(0);
+  });
 });
