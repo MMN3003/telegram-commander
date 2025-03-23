@@ -10,9 +10,6 @@ app.use(bodyParser.json());
 // Database setup
 const db = new sqlite3.Database(process.env.DB_PATH || "./crawler.db");
 
-// Session management
-const userSessions = new Map();
-
 // Telegram API configuration
 const BOT_TOKEN = process.env.TELEGRAM_BOT_API_KEY;
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
@@ -24,15 +21,16 @@ axios
   .then(() => console.log("Webhook set successfully"))
   .catch((err) => console.error("Error setting webhook:", err));
 
-// Handle incoming updates
+// Log every update received at webhook for debugging
 app.post("/webhook", async (req, res) => {
   const update = req.body;
+  console.log("Update received:", JSON.stringify(update, null, 2));
   if (update.message) {
     await handleMessage(update.message);
   } else if (update.callback_query) {
     await handleCallbackQuery(update.callback_query);
   } else {
-    console.log("Received unknown update:", update);
+    console.log("Received unknown update type");
   }
   res.sendStatus(200);
 });
@@ -41,7 +39,7 @@ app.post("/webhook", async (req, res) => {
 async function handleMessage(message) {
   const chatId = message.chat.id;
   const text = message.text || "";
-  console.log("Received message:", message);
+  console.log("Received message:", text);
   if (text.startsWith("/start")) {
     sendMainMenu(chatId);
   } else if (text.startsWith("/search")) {
@@ -76,16 +74,24 @@ async function sendMainMenu(chatId) {
 }
 
 async function handleCallbackQuery(callbackQuery) {
-  console.log("Received callback query:", callbackQuery);
+  console.log(
+    "Received callback query:",
+    JSON.stringify(callbackQuery, null, 2)
+  );
   const chatId = callbackQuery.message.chat.id;
   const data = callbackQuery.data.split(":");
+  console.log("Parsed callback data:", data);
 
   try {
-    // Acknowledge the callback to hide the loading spinner
+    // Acknowledge the callback query to remove the loading spinner
     await axios.post(`${API_URL}/answerCallbackQuery`, {
       callback_query_id: callbackQuery.id,
     });
+  } catch (err) {
+    console.error("Error in answerCallbackQuery:", err.response?.data || err);
+  }
 
+  try {
     switch (data[0]) {
       case "search_init":
         await sendMessage(chatId, "Please use /search <query> to find content");
@@ -115,12 +121,11 @@ async function handleCallbackQuery(callbackQuery) {
         await sendMessage(chatId, "❌ Unknown command");
     }
   } catch (error) {
-    console.error("Callback handling error:", error);
+    console.error("Error handling callback command:", error);
     await sendMessage(chatId, "⚠️ An error occurred. Please try again.");
   }
 }
 
-// Database search function
 async function searchPages(chatId, query) {
   db.all(
     `SELECT id, name FROM pages 
@@ -132,18 +137,15 @@ async function searchPages(chatId, query) {
         console.error("Search error:", err);
         return sendMessage(chatId, "❌ Search failed. Please try again.");
       }
-
       if (pages.length === 0) {
         return sendMessage(chatId, "🔍 No results found");
       }
-
       const buttons = pages.map((page) => [
         {
           text: page.name,
           callback_data: `page:${page.id}`,
         },
       ]);
-
       sendMessage(chatId, "🔎 Search results:", buttons);
     }
   );
@@ -152,7 +154,7 @@ async function searchPages(chatId, query) {
 async function showSeasons(chatId, pageId) {
   let loadingMessageId;
   try {
-    // Send a loading message and store its ID
+    // Send loading message
     const loadingMessage = await sendMessage(chatId, "⏳ Loading seasons...");
     loadingMessageId = loadingMessage.message_id;
 
@@ -165,22 +167,17 @@ async function showSeasons(chatId, pageId) {
       async (err, seasons) => {
         try {
           if (err) throw err;
-
-          // Delete the loading message
+          // Delete loading message
           await axios.post(`${API_URL}/deleteMessage`, {
             chat_id: chatId,
             message_id: loadingMessageId,
           });
-
-          // Prepare season buttons
           const buttons = seasons.map((season) => [
             {
               text: `Season ${season.season}`,
               callback_data: `season:${pageId}:${season.season}`,
             },
           ]);
-
-          // Add a Back button to return to main menu
           buttons.push([{ text: "← Back", callback_data: "back:search" }]);
           await sendMessage(chatId, "📺 Select season:", buttons);
         } catch (error) {
@@ -190,7 +187,7 @@ async function showSeasons(chatId, pageId) {
       }
     );
   } catch (error) {
-    console.error("Season display error:", error);
+    console.error("Error in showSeasons:", error);
     await sendMessage(chatId, "⚠️ Failed to display seasons");
   }
 }
@@ -207,22 +204,18 @@ async function showEpisodes(chatId, pageId, season) {
         console.error("Episodes load error:", err);
         return sendMessage(chatId, "❌ Failed to load episodes");
       }
-
       const buttons = episodes.map((episode) => [
         {
           text: `Episode ${episode.episode}`,
           callback_data: `episode:${pageId}:${season}:${episode.episode}`,
         },
       ]);
-
-      // Back button to return to season selection
       buttons.push([{ text: "← Back", callback_data: `back:page:${pageId}` }]);
       sendMessage(chatId, "Select episode:", buttons);
     }
   );
 }
 
-// Media sending function
 async function sendMedia(chatId, pageId, season, episode) {
   db.all(
     `SELECT * FROM media 
@@ -234,36 +227,29 @@ async function sendMedia(chatId, pageId, season, episode) {
         console.error("Media load error:", err);
         return sendMessage(chatId, "❌ Failed to load media");
       }
-
-      // Group media by type
       const mediaGroups = {
         image: [],
         video: [],
       };
-
       mediaItems.forEach((item) => {
         mediaGroups[item.type].push(item.url);
       });
-
-      // Send images as a group if available
       if (mediaGroups.image.length > 0) {
         await sendPhotoGroup(chatId, mediaGroups.image);
       }
-
-      // Send videos with a caption on the first video
       mediaGroups.video.forEach(async (videoUrl, index) => {
         const caption =
           index === 0
             ? `Season ${escapeHtml(season)} Episode ${escapeHtml(episode)}`
             : "";
         await sendVideo(chatId, videoUrl, caption);
-        await delay(500); // Simple rate limiting
+        await delay(500);
       });
     }
   );
 }
 
-// Utility function for HTML escaping (used for media captions)
+// Simple HTML escape (used for media captions)
 const escapeHtml = (text) => {
   return text
     .replace(/</g, "&lt;")
@@ -271,12 +257,11 @@ const escapeHtml = (text) => {
     .replace(/&/g, "&amp;");
 };
 
-// Modified sendMessage: removed escape to allow proper HTML formatting
 async function sendMessage(chatId, text, buttons = []) {
   try {
     const response = await axios.post(`${API_URL}/sendMessage`, {
       chat_id: chatId,
-      text, // Text is sent as-is
+      text, // Send text as-is so HTML formatting works
       parse_mode: "HTML",
       reply_markup:
         buttons.length > 0 ? { inline_keyboard: buttons } : undefined,
@@ -284,7 +269,7 @@ async function sendMessage(chatId, text, buttons = []) {
     console.log("Message sent:", response.data);
     return response.data;
   } catch (error) {
-    console.error("Message send error:", error.response?.data);
+    console.error("Message send error:", error.response?.data || error);
     throw error;
   }
 }
@@ -312,17 +297,12 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Back navigation handler for inline buttons
 async function handleBackNavigation(chatId, data) {
-  // data[1] holds the back target type
   if (data[1] === "search") {
-    // Go back to main menu
     await sendMainMenu(chatId);
   } else if (data[1] === "page" && data[2]) {
-    // Go back to season selection for the given page
     await showSeasons(chatId, data[2]);
   } else {
-    // Default to main menu if no valid target is found
     await sendMainMenu(chatId);
   }
 }
