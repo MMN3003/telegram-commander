@@ -137,6 +137,15 @@ function showEpisodes(chatId, pageId, season) {
 
 // Sends media (images and videos) for a given page, season, and episode.
 function sendMedia(chatId, pageId, season, episode) {
+  console.log(
+    "Sending media for page:",
+    pageId,
+    "season:",
+    season,
+    "episode:",
+    episode
+  );
+  
   db.all(
     `SELECT * FROM media 
      WHERE page_id = ? AND season = ? AND episode = ? 
@@ -147,11 +156,20 @@ function sendMedia(chatId, pageId, season, episode) {
         console.error("Media load error:", err);
         return bot.sendMessage(chatId, "❌ Failed to load media");
       }
+
       const mediaGroups = { image: [], video: [] };
       mediaItems.forEach((item) => {
-        mediaGroups[item.type].push(item.url);
+        if (item.type === "video") {
+          mediaGroups.video.push({
+            url: item.url,
+            resolution: item.resolution || "HD", // Default to 'HD' if no resolution
+          });
+        } else {
+          mediaGroups.image.push(item.url);
+        }
       });
-      // Send images as a media group.
+
+      // Send images first
       if (mediaGroups.image.length > 0) {
         const mediaArray = mediaGroups.image.map((url) => ({
           type: "photo",
@@ -159,17 +177,31 @@ function sendMedia(chatId, pageId, season, episode) {
         }));
         bot.sendMediaGroup(chatId, mediaArray);
       }
-      // Send videos one-by-one, with a caption on the first.
-      mediaGroups.video.forEach((videoUrl, index) => {
+
+      // Create resolution buttons
+      if (mediaGroups.video.length > 0) {
+        const buttons = mediaGroups.video.map((video) => ({
+          text: `${video.resolution}`,
+          url: video.url,
+        }));
+
+        // Arrange buttons in rows of 2
+        const keyboardRows = [];
+        while (buttons.length > 0) {
+          keyboardRows.push(buttons.splice(0, 2));
+        }
+
         const caption =
-          index === 0
-            ? `Season ${escapeHtml(season)} Episode ${escapeHtml(episode)}`
-            : "";
-        // Use a delay to avoid hitting rate limits.
-        setTimeout(() => {
-          bot.sendVideo(chatId, videoUrl, { caption, parse_mode: "HTML" });
-        }, 500 * index);
-      });
+          `📺 *Season ${escapeHtml(season)} Episode ${escapeHtml(episode)}*\n` +
+          `Select resolution:`;
+
+        bot.sendMessage(chatId, caption, {
+          parse_mode: "Markdown",
+          reply_markup: {
+            inline_keyboard: keyboardRows,
+          },
+        });
+      }
     }
   );
 }
